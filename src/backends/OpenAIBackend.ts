@@ -31,6 +31,13 @@ import type { TranscriptionMessage } from '../transcriberproxy';
 
 const OPENAI_WS_URL = 'wss://api.openai.com/v1/realtime?intent=transcription';
 
+/**
+ * How much audio an openai_custom connection sends per input_audio_buffer.append: 100 ms of 24 kHz
+ * 16-bit mono, five 20 ms Opus frames. A self-hosted server pays its per-message cost (receiving,
+ * JSON, base64) five times less often. What is held is sent before a commit and at close.
+ */
+const CUSTOM_APPEND_BYTES = 4800;
+
 export class OpenAIBackend implements TranscriptionBackend {
 	private ws?: WebSocket;
 	private status: 'pending' | 'connected' | 'failed' | 'closed' = 'pending';
@@ -40,6 +47,10 @@ export class OpenAIBackend implements TranscriptionBackend {
 	private lastTranscriptTime?: number;
 	private wsUrl: string;
 	private apiKey: string;
+	// Audio held until it makes one append (openai_custom only; 0: every chunk is sent as it comes).
+	private appendBytes: number;
+	private held: Buffer[] = [];
+	private heldBytes = 0;
 
 	onInterimTranscription?: (message: TranscriptionMessage) => void;
 	onCompleteTranscription?: (message: TranscriptionMessage) => void;
@@ -51,6 +62,8 @@ export class OpenAIBackend implements TranscriptionBackend {
 		this.participantInfo = participantInfo;
 		this.wsUrl = wsUrl ?? OPENAI_WS_URL;
 		this.apiKey = apiKey ?? config.openai.apiKey;
+		// A URL of its own is openai_custom's: appends of 100 ms. OpenAI's own API keeps one per chunk.
+		this.appendBytes = wsUrl ? CUSTOM_APPEND_BYTES : 0;
 	}
 
 	async connect(backendConfig: BackendConfig): Promise<void> {
@@ -121,16 +134,35 @@ export class OpenAIBackend implements TranscriptionBackend {
 		}
 
 		try {
-			const audioMessage = {
-				type: 'input_audio_buffer.append',
-				audio: audioBase64,
-			};
-
-			this.ws.send(JSON.stringify(audioMessage));
+			if (this.appendBytes === 0) {
+				this.sendAppend(audioBase64);
+				return;
+			}
+			const chunk = Buffer.from(audioBase64, 'base64');
+			this.held.push(chunk);
+			this.heldBytes += chunk.length;
+			if (this.heldBytes >= this.appendBytes) {
+				this.sendHeld();
+			}
 		} catch (error) {
 			logger.error(`Failed to send audio to OpenAI for tag ${this.tag}`, error);
 			throw error;
 		}
+	}
+
+	private sendAppend(audioBase64: string): void {
+		this.ws?.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: audioBase64 }));
+	}
+
+	/** Sends the audio held, if any, as one append. */
+	private sendHeld(): void {
+		if (this.heldBytes === 0) {
+			return;
+		}
+		const audio = Buffer.concat(this.held, this.heldBytes).toString('base64');
+		this.held = [];
+		this.heldBytes = 0;
+		this.sendAppend(audio);
 	}
 
 	forceCommit(): void {
@@ -139,6 +171,8 @@ export class OpenAIBackend implements TranscriptionBackend {
 		}
 
 		logger.debug(`Forcing commit for idle connection ${this.tag}`);
+		// The commit covers every sample: the audio held goes first.
+		this.sendHeld();
 		const commitMessage = { type: 'input_audio_buffer.commit' };
 		this.ws.send(JSON.stringify(commitMessage));
 	}
@@ -162,6 +196,15 @@ export class OpenAIBackend implements TranscriptionBackend {
 
 	close(): void {
 		logger.debug(`Closing OpenAI backend for tag: ${this.tag}`);
+		if (this.status === 'connected') {
+			try {
+				this.sendHeld();
+			} catch (error) {
+				logger.warn(`Failed to send the audio held before closing for tag ${this.tag}`, error);
+			}
+		}
+		this.held = [];
+		this.heldBytes = 0;
 		// Forget the socket before closing it: closing a socket that is still connecting can fire
 		// 'error' inside close(), and that handler calls close() again, which must then do nothing.
 		const ws = this.ws;

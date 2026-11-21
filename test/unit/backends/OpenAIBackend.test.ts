@@ -268,6 +268,77 @@ describe('OpenAIBackend', () => {
 		});
 	});
 
+	describe('openai_custom appends', () => {
+		const CUSTOM_URL = 'wss://stt.example/v1/realtime';
+		// One 20 ms frame of 24 kHz 16-bit mono: 480 samples, each holding its frame's number.
+		const frame = (n: number) => Buffer.alloc(960, n);
+
+		async function connected() {
+			const backend = new OpenAIBackend('test-tag', { id: 'participant-1' }, CUSTOM_URL, 'custom-key');
+			const connectPromise = backend.connect({ model: 'whisper-1', language: undefined, prompt: undefined });
+			mockWsManager.mockWs.simulateOpen();
+			await connectPromise;
+			mockWsManager.mockWs.clearSentMessages();
+			return backend;
+		}
+
+		const sent = () => mockWsManager.mockWs.getSentMessages().map((message: string) => JSON.parse(message));
+		const appended = () =>
+			sent()
+				.filter((message: { type: string }) => message.type === 'input_audio_buffer.append')
+				.map((message: { audio: string }) => Buffer.from(message.audio, 'base64'));
+
+		it('sends an append per 100 ms', async () => {
+			const backend = await connected();
+
+			for (let n = 0; n < 15; n++) {
+				await backend.sendAudio(frame(n).toString('base64'));
+			}
+
+			const appends = appended();
+			expect(appends.map((audio) => audio.length)).toEqual([4800, 4800, 4800]);
+			expect(Buffer.concat(appends)).toEqual(Buffer.concat(Array.from({ length: 15 }, (_, n) => frame(n))));
+		});
+
+		it('sends what it holds before a commit and at close', async () => {
+			const backend = await connected();
+			// 260 ms: 13 frames, then a commit.
+			for (let n = 0; n < 13; n++) {
+				await backend.sendAudio(frame(n).toString('base64'));
+			}
+			backend.forceCommit();
+
+			expect(sent().map((message: { type: string }) => message.type)).toEqual([
+				'input_audio_buffer.append',
+				'input_audio_buffer.append',
+				'input_audio_buffer.append',
+				'input_audio_buffer.commit',
+			]);
+			expect(appended().map((audio) => audio.length)).toEqual([4800, 4800, 2880]);
+
+			// 40 ms more, then the connection closes: they are sent before it does.
+			mockWsManager.mockWs.clearSentMessages();
+			await backend.sendAudio(frame(13).toString('base64'));
+			await backend.sendAudio(frame(14).toString('base64'));
+			backend.close();
+
+			expect(appended()).toEqual([Buffer.concat([frame(13), frame(14)])]);
+		});
+
+		it("keeps one append per chunk on OpenAI's own API", async () => {
+			const backend = new OpenAIBackend('test-tag', { id: 'participant-1' });
+			const connectPromise = backend.connect({ model: 'gpt-4o-transcribe', language: undefined, prompt: undefined });
+			mockWsManager.mockWs.simulateOpen();
+			await connectPromise;
+			mockWsManager.mockWs.clearSentMessages();
+
+			await backend.sendAudio(frame(0).toString('base64'));
+			await backend.sendAudio(frame(1).toString('base64'));
+
+			expect(appended()).toEqual([frame(0), frame(1)]);
+		});
+	});
+
 	describe('forceCommit', () => {
 		it('should send input_audio_buffer.commit message', async () => {
 			const backend = new OpenAIBackend('test-tag', { id: 'participant-1' });
