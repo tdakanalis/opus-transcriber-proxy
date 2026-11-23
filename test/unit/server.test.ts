@@ -39,7 +39,7 @@ vi.mock('http', () => {
 });
 
 vi.mock('ws', () => ({
-	WebSocketServer: vi.fn(() => ({ on: vi.fn() })),
+	WebSocketServer: vi.fn(() => ({ on: vi.fn(), clients: new Set() })),
 	WebSocket: vi.fn(),
 }));
 
