@@ -47,6 +47,7 @@ import {
 import { setMetricDebug, writeMetric } from './metrics';
 import logger, { addOtlpTransport } from './logger';
 import { sessionManager } from './SessionManager';
+import { drain, type Drain } from './drain';
 import { flushTranslationUsage } from './usage-reporter';
 import { initTelemetry, initTelemetryLogs, shutdownTelemetry, shutdownTelemetryLogs, isTelemetryEnabled } from './telemetry';
 import { getInstruments } from './telemetry/instruments';
@@ -1059,9 +1060,34 @@ server.listen(PORT, HOST, () => {
 	logger.info('='.repeat(60));
 });
 
-// Graceful shutdown
+// Graceful shutdown. The first SIGTERM stops accepting connections and keeps the open ones until they end, at most
+// SHUTDOWN_DRAIN_TIMEOUT seconds (0 by default: none kept), so a new copy started beside this one takes the new
+// sessions while the current ones finish here. A second SIGTERM stops waiting.
+let draining: Drain | undefined;
 process.on('SIGTERM', async () => {
-	logger.info('SIGTERM received, closing server...');
+	if (draining) {
+		logger.info('SIGTERM received again, closing the open connections now');
+		draining.stop();
+		return;
+	}
+	const limitS = config.shutdownDrainTimeout;
+	logger.info(
+		limitS > 0
+			? `SIGTERM received, refusing new connections; ${wss.clients.size} open connection(s) kept until they end, at most ${limitS} s`
+			: 'SIGTERM received, closing server...',
+	);
+	draining = drain(server, () => wss.clients.size, {
+		limitS,
+		onWaiting: (open, waitedS) => logger.info(`Draining: ${open} open connection(s) after ${waitedS} s`),
+	});
+	const end = await draining.done;
+	if (limitS > 0) {
+		logger.info(
+			end === 'ended'
+				? 'Every connection has ended'
+				: `Closing ${wss.clients.size} open connection(s): ${end === 'limit' ? 'the drain limit passed' : 'stopped'}`,
+		);
+	}
 
 	// Shut down transcription sessions (SessionManager) and close active translation proxies — each
 	// TranslatorConnection flushes its final usage delta into the reporter buffer on close — so the
@@ -1080,8 +1106,7 @@ process.on('SIGTERM', async () => {
 	await Promise.all([flushTranslationUsage(), shutdownTelemetry()]);
 	await shutdownTelemetryLogs();
 
-	server.close(() => {
-		logger.info('Server closed');
-		process.exit(0);
-	});
+	await draining.closed;
+	logger.info('Server closed');
+	process.exit(0);
 });

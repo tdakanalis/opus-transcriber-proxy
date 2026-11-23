@@ -485,6 +485,9 @@ export const config = {
 		host: process.env.HOST || '0.0.0.0',
 	},
 	forceCommitTimeout: parseIntOrDefault(process.env.FORCE_COMMIT_TIMEOUT, 2),
+	// On SIGTERM, how long to keep the open connections until they end, in seconds; new ones are refused meanwhile.
+	// 0 (the default) closes them at once.
+	shutdownDrainTimeout: parseIntOrDefault(process.env.SHUTDOWN_DRAIN_TIMEOUT, 0),
 	broadcastTranscripts: process.env.BROADCAST_TRANSCRIPTS === 'true',
 	broadcastTranscriptsMaxSize: parseIntOrDefault(process.env.BROADCAST_TRANSCRIPTS_MAX_SIZE, 5 * 1024), // Default 5 KB
 	dumpWebSocketMessages: process.env.DUMP_WEBSOCKET_MESSAGES === 'true',

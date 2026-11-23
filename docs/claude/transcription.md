@@ -113,5 +113,6 @@ See README.md for the complete list.
 - `FORCE_COMMIT_TIMEOUT` - Seconds before finalizing pending audio (default: 2)
 - `SESSION_RESUME_ENABLED` - Enable session resumption (default: true)
 - `SESSION_RESUME_GRACE_PERIOD` - Resume grace period in seconds (default: 15)
+- `SHUTDOWN_DRAIN_TIMEOUT` - On SIGTERM, seconds to keep the open connections until their clients close them, refusing new ones meanwhile, so a copy started beside this one takes the new sessions; a second SIGTERM stops waiting (default: 0, closed at once; `src/drain.ts`)
 - `USE_DISPATCHER` - Enable dispatcher forwarding
 - `ENABLE_TRANSCRIBE` / `ENABLE_TRANSLATE` - Per-endpoint enablement (default: true each); a disabled endpoint's WS upgrade is rejected with 404
